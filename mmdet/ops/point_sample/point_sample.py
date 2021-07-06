@@ -1,5 +1,6 @@
 # Modified from https://github.com/facebookresearch/detectron2/tree/master/projects/PointRend  # noqa
 
+import math
 from os import path as osp
 import torch
 import torch.nn as nn
@@ -8,8 +9,12 @@ from torch.nn.modules.utils import _pair
 from torch.onnx.operators import shape_as_tensor
 
 from mmcv.ops import get_onnxruntime_op_path
+from mmdet.utils.deployment.operations_domain import add_domain
+from mmdet.utils.deployment.symbolic import py_symbolic
 
 
+
+#@py_symbolic(op_name='grid_sampler')
 def bilinear_grid_sample(im, grid, align_corners=False):
     n, c, h, w = im.shape
     gn, gh, gw, _ = grid.shape
@@ -40,12 +45,42 @@ def bilinear_grid_sample(im, grid, align_corners=False):
 
     # Apply default for grid_sample function zero padding
     im_padded = F.pad(im, pad=[1, 1, 1, 1], mode='constant', value=0)
+    padded_h = h + 2
+    padded_w = w + 2
+    if isinstance(h, torch.Tensor):
+        padded_h = padded_h.to(y0.device)
+        padded_w = padded_w.to(x0.device)
     # save points positions after padding
     x0, x1, y0, y1 = x0 + 1, x1 + 1, y0 + 1, y1 + 1
 
+    #x0[x0 < 0] = 0
+    #x0[x0 > padded_w - 1] = padded_w - 1
+    #x1[x1 < 0] = 0
+    #x1[x1 > padded_w - 1] = padded_w - 1
+    #y0[y0 < 0] = 0
+    #y0[y0 > padded_h - 1] = padded_h - 1
+    #y1[y1 < 0] = 0
+    #y1[y1 > padded_h - 1] = padded_h - 1
+
+    inds = torch.where(x0 < 0)
+    x0[inds] = 0
+    inds = torch.where(x0 > padded_w - 1)
+    x0[inds] = padded_w - 1
+    inds = torch.where(x1 < 0)
+    x1[inds] = 0
+    inds = torch.where(x1 > padded_w - 1)
+    x1[inds] = padded_w - 1
+    inds = torch.where(y0 < 0)
+    y0[inds] = 0
+    inds = torch.where(y0 > padded_h - 1)
+    y0[inds] = padded_h - 1
+    inds = torch.where(y1 < 0)
+    y1[inds] = 0
+    inds = torch.where(y1 > padded_h - 1)
+    y1[inds] = padded_h - 1
+
     im_padded = im_padded.view(n, c, -1)
 
-    padded_w = w + 2
     x0_y0 = (x0 + y0 * padded_w).unsqueeze(1).expand(-1, c, -1)
     x0_y1 = (x0 + y1 * padded_w).unsqueeze(1).expand(-1, c, -1)
     x1_y0 = (x1 + y0 * padded_w).unsqueeze(1).expand(-1, c, -1)
@@ -57,6 +92,18 @@ def bilinear_grid_sample(im, grid, align_corners=False):
     Id = torch.gather(im_padded, 2, x1_y1)
 
     return (Ia * wa + Ib * wb + Ic * wc + Id * wd).reshape(n, c, gh, gw)
+
+
+class GridSampleOp(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, im, grid):
+        return F.grid_sample(im, grid)
+
+    @staticmethod
+    def symbolic(g, im, grid):
+        return g.op(add_domain('GridSample'), im, grid)
+
+point_sample_fn = GridSampleOp.apply
 
 
 def is_in_onnx_export_without_custom_ops():
@@ -222,13 +269,14 @@ def point_sample(input, points, align_corners=False, **kwargs):
     if points.dim() == 3:
         add_dim = True
         points = points.unsqueeze(2)
-    print(f'>>>>> {input.shape} >> {points.shape}')
-    if is_in_onnx_export_without_custom_ops():
-        output = bilinear_grid_sample(
+    #print(f'>>>>> {input.shape} >> {points.shape}')
+    #if is_in_onnx_export_without_custom_ops():
+    output = bilinear_grid_sample(
             input, denormalize(points), align_corners=align_corners)
-    else:
-        output = F.grid_sample(
-            input, denormalize(points), align_corners=align_corners, **kwargs)
+    #else:
+    #output = point_sample_fn(input, denormalize(points))
+    #    output = F.grid_sample(
+    #        input, denormalize(points), align_corners=align_corners, **kwargs)
     if add_dim:
         output = output.squeeze(3)
     return output
@@ -276,7 +324,7 @@ class SimpleRoIAlign(nn.Module):
                     rel_img_points = rel_roi_point_to_rel_img_point(
                         rois[inds], rel_roi_points[inds], feat,
                         self.spatial_scale).unsqueeze(0)
-                    print('\n----> SimpleRoIAlign ->')
+                    #print('\n----> SimpleRoIAlign ->')
                     point_feat = point_sample(
                         feat, rel_img_points, align_corners=not self.aligned)
                     point_feat = point_feat.squeeze(0).transpose(0, 1)

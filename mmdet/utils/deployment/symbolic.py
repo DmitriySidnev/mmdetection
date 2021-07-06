@@ -319,10 +319,17 @@ def nms_symbolic_with_score_thr(g, bboxes, scores, iou_threshold, score_threshol
                     value_t=torch.tensor([2], dtype=torch.long))), 1)
 
 
+@parse_args('v', 'v')
+def my_grid_sampler(g, im, grid):
+    from mmdet.ops.point_sample import point_sample_fn
+    return point_sample_fn(g, im, grid)
+
+
 def register_extra_symbolics(opset=10):
     assert opset >= 10
     register_op('view_as', view_as_symbolic, '', opset)
     register_op('topk', topk_symbolic, '', opset)
+    register_op('grid_sampler', my_grid_sampler, '', opset)
     # register_op('multiclass_nms_core', multiclass_nms_core_symbolic, 'mmdet_custom', opset)
     
     patch_nms_aten_to()
